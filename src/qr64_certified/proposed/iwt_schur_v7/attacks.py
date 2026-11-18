@@ -107,3 +107,45 @@ def all_cases():
         for name,settings in attacks.items():
             for i,level in enumerate(LEVELS):
                 yield cat,name,level,settings[i]
+
+# Canonical, versioned protocol used by every comparable experiment.  The
+# legacy all_cases() generator remains unchanged for V7 reference regression.
+PROTOCOL_VERSION = 'webp20x3_61_v1'
+
+
+def canonical_conditions():
+    """Return 1 clean + 60 attack conditions with stable IDs and parameters."""
+    conditions = [dict(condition_id='C000', category='Clean', attack='none',
+                       level='Clean', parameter='', attack_index=0)]
+    for index, (category, name, level, value) in enumerate(all_cases(), 1):
+        conditions.append(dict(condition_id=f'A{index:03d}', category=category,
+                               attack=name, level=level, parameter=repr(value),
+                               attack_index=index))
+    assert len(conditions) == 61
+    assert len({item['condition_id'] for item in conditions}) == 61
+    return conditions
+
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def protocol_sha256():
+    """Hash the ordered *definitions*, not the attack results or image bytes."""
+    import hashlib
+    import json
+    from pathlib import Path
+    # Include executable attack semantics, not just declared severity values.
+    code_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    data = {'version': PROTOCOL_VERSION, 'conditions': canonical_conditions(),
+            'attack_implementation_sha256': code_sha256}
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+@lru_cache(maxsize=64)
+def condition_for(attack_name, level):
+    """Resolve a result row to the identical protocol condition for all methods."""
+    for condition in canonical_conditions():
+        if (condition['attack'], condition['level']) == (attack_name, level):
+            return condition
+    raise KeyError(f'Attack is not in {PROTOCOL_VERSION}: {(attack_name, level)!r}')

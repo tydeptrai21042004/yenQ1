@@ -42,6 +42,7 @@ from qr64_certified.proposed.iwt_schur_v7 import attacks
 DEFAULT_CONFIG=ROOT/'configs/iwt_schur_v7.json'
 RESULT_COLUMNS=(
     'experiment','method_id','variant','baseline_blindness','host','watermark',
+    'protocol_version','protocol_sha256','condition_id','attack_index',
     'key_fingerprint','nonce','seed','category','attack','level','parameter',
     'status','error','clean_psnr_db','clean_ssim','clean_nc','clean_ncc',
     'clean_ber','attacked_nc','attacked_ncc','attacked_ber','bit_accuracy',
@@ -52,11 +53,47 @@ RESULT_COLUMNS=(
 
 def write_rows(path:Path,rows:list[dict]):
     path.parent.mkdir(parents=True,exist_ok=True)
+    for row in rows:
+        if row.get('attack') is not None and row.get('level') is not None:
+            case=attacks.condition_for(row['attack'],row['level'])
+            row['protocol_version']=attacks.PROTOCOL_VERSION
+            row['protocol_sha256']=attacks.protocol_sha256()
+            row['condition_id']=case['condition_id']
+            row['attack_index']=case['attack_index']
+            row.setdefault('parameter',case['parameter'])
     fields=list(dict.fromkeys(list(RESULT_COLUMNS)+[field for row in rows for field in row]))
     with path.open('w',newline='',encoding='utf-8') as f:
         writer=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore')
         writer.writeheader();writer.writerows(rows)
 
+
+
+def completed_group(args, method_id, variant, host_name, watermark_name, *, allow_na=False):
+    """Return only a complete prior 1-clean+N-attack group from this exact run."""
+    prior=getattr(args, '_resume_rows', [])
+    selected=[row for row in prior if row.get('method_id')==method_id
+              and row.get('variant')==variant and row.get('host')==host_name
+              and row.get('watermark')==watermark_name]
+    if len(selected)!=len(all_cases(args))+1:return None
+    expected={c['condition_id'] for c in attacks.canonical_conditions()[:len(all_cases(args))+1]}
+    if {row.get('condition_id') for row in selected}!=expected:return None
+    if len({row.get('condition_id') for row in selected})!=len(selected):return None
+    accepted={'ok','not_applicable_capacity'} if allow_na else {'ok'}
+    if any(row.get('status') not in accepted for row in selected):return None
+    if any(row.get('protocol_sha256')!=attacks.protocol_sha256() for row in selected):return None
+    return selected
+
+
+def inputs_sha256():
+    """Changes in implementations or source data invalidate CSV resume."""
+    h=hashlib.sha256()
+    for folder in ('src','configs','data'):
+        for path in sorted((ROOT/folder).rglob('*')):
+            if not path.is_file() or path.suffix=='.pyc' or '__pycache__' in path.parts:continue
+            h.update(str(path.relative_to(ROOT)).encode())
+            h.update(hashlib.sha256(path.read_bytes()).digest())
+    h.update(hashlib.sha256(Path(__file__).read_bytes()).digest())
+    return h.hexdigest()
 
 def read_json(path): return json.loads(Path(path).read_text(encoding='utf-8'))
 
@@ -108,10 +145,13 @@ def derive_nonce(host,watermark,seed,override=None):
 
 
 def settings_identity(args,cfg):
+    import scipy, PIL
     return {'proposal_id':'iwt_schur_4x4_dual_pilot',
-            'parameters':asdict(cfg),'protocol':'webp20x3',
+            'parameters':asdict(cfg),'protocol':attacks.PROTOCOL_VERSION,
+            'protocol_sha256':attacks.protocol_sha256(),
             'seed':args.seed,'python':sys.version.split()[0],
             'opencv':cv2.__version__,'numpy':np.__version__,
+            'scipy':scipy.__version__,'pillow':PIL.__version__,
             'platform':platform.platform(),'baseline_source_modified':False}
 
 
@@ -209,8 +249,9 @@ def eval_one_pair(hpath,wpath,args,cfg,key,variant='full',decode='full',experime
 def run_benchmark(args,cfg,key):
     allrows=[]
     for h,w in samples(args):
-        print('PROPOSAL',h.name,w.name,flush=True)
-        allrows.extend(eval_one_pair(h,w,args,cfg,key))
+        saved=completed_group(args,'iwt_schur_4x4_dual_pilot','full',h.name,w.name)
+        print('PROPOSAL',h.name,w.name, 'RESUME' if saved else 'EXECUTE',flush=True)
+        allrows.extend(saved if saved is not None else eval_one_pair(h,w,args,cfg,key))
         write_rows(Path(args.out)/'per_attack.csv',allrows)
     return allrows
 
@@ -258,8 +299,15 @@ def run_ablation(args,cfg,key):
     variants=args.variants.split(',') if args.variants else list(DECODER_VARIANTS)+list(ENCODER_VARIANTS)
     for h,w in samples(args):
         host=load_host(h);wm=load_wm(w);nonce=derive_nonce(h,w,args.seed,args.nonce)
+        cached={v:completed_group(args,'iwt_schur_4x4_dual_pilot',v,h.name,w.name)
+                for v in variants}
+        if all(cached.values()):
+            for v in variants:rows.extend(cached[v])
+            write_rows(Path(args.out)/'per_attack.csv',rows)
+            print('ABLATION RESUME',h.stem,w.stem,flush=True)
+            continue
         shared=None
-        if any(v in DECODER_VARIANTS for v in variants):
+        if any(v in DECODER_VARIANTS and cached[v] is None for v in variants):
             t=time.perf_counter();shared=method.embed(host,wm,key=key,nonce=nonce,cfg=cfg)
             shared_seconds=time.perf_counter()-t
         cases=all_cases(args)
@@ -270,6 +318,8 @@ def run_ablation(args,cfg,key):
             for _,name,level,param in cases:
                 attacked_shared[(name,level)]=attacks.attack(shared,name,level,seed=args.seed)
         for variant in variants:
+            if cached[variant] is not None:
+                rows.extend(cached[variant]);continue
             if variant in DECODER_VARIANTS:
                 marked=shared;used_cfg=cfg;dec=variant;seconds=shared_seconds
             elif variant in ENCODER_VARIANTS:
@@ -321,9 +371,15 @@ def run_sweep(args,cfg,key):
     for h,w in samples(args):
         for a in qll:
             for b in qdt:
+                variant=f'q_ll={a};q_detail={b}'
+                saved=completed_group(args,'iwt_schur_4x4_dual_pilot',variant,h.name,w.name)
+                if saved is not None:
+                    rows.extend(saved)
+                    write_rows(Path(args.out)/'per_attack.csv',rows)
+                    continue
                 trial=replace(cfg,q_ll=a,q_detail=b)
                 try:
-                    tmp=eval_one_pair(h,w,args,trial,key,variant=f'q_ll={a};q_detail={b}',experiment='sweep')
+                    tmp=eval_one_pair(h,w,args,trial,key,variant=variant,experiment='sweep')
                     rows.extend(tmp)
                 except Exception as exc:
                     rows.append({'experiment':'sweep','host':h.name,'watermark':w.name,
@@ -347,6 +403,11 @@ def run_payload(args,cfg,key):
             trial=replace(cfg,ll_copies=ll,detail_copies=detail)
             for h,w in samples(args):
                 variant=f'LLcopies={ll};detailcopies={detail}'
+                saved=completed_group(args,'iwt_schur_4x4_dual_pilot',variant,h.name,w.name)
+                if saved is not None:
+                    rows.extend(saved)
+                    write_rows(Path(args.out)/'per_attack.csv',rows)
+                    continue
                 try:rows.extend(eval_one_pair(h,w,args,trial,key,variant,experiment='payload'))
                 except Exception as exc:
                     rows.append({'experiment':'payload','variant':variant,'host':h.name,'watermark':w.name,
@@ -392,6 +453,26 @@ def run_baselines(args):
         orig_rgb=load_host_rgb(h);wm=load_watermark_binary(w)
         for baseline_id in selected:
             spec=get_baseline_spec(baseline_id)
+            saved=completed_group(args,baseline_id,'original_unmodified',h.name,w.name,allow_na=True)
+            if saved is not None:
+                rows.extend(saved)
+                write_rows(Path(args.out)/'per_attack.csv',rows)
+                print('BASELINE RESUME',baseline_id,h.stem,w.stem,flush=True)
+                continue
+            # Preserve the published algorithm.  A method whose native 512x512
+            # capacity is <4096 bits is INELIGIBLE, not an algorithm failure.
+            if not spec.common_4096_payload:
+                for condition in attacks.canonical_conditions()[:1+len(all_cases(args))]:
+                    rows.append({'experiment':'baselines','method_id':baseline_id,
+                        'variant':'original_unmodified', 'baseline_blindness':spec.blindness_tier,
+                        'host':h.name,'watermark':w.name,'seed':args.seed,
+                        'category':condition['category'],'attack':condition['attack'],
+                        'level':condition['level'],'parameter':condition['parameter'],
+                        'status':'not_applicable_capacity',
+                        'error':'Original algorithm cannot carry 4096 bits in a 512x512 host; unchanged.'})
+                write_rows(Path(args.out)/'per_attack.csv',rows)
+                print('BASELINE EXCLUDED (capacity)',baseline_id,h.stem,w.stem,flush=True)
+                continue
             t=time.perf_counter()
             try:
                 marked,key=embed_baseline(baseline_id,orig_rgb,wm,seed=args.seed)
@@ -408,7 +489,8 @@ def run_baselines(args):
                         'embed_seconds':embed_seconds,'extract_seconds':ext_s}
                 rows.append({**common,'category':'Clean','attack':'none','level':'Clean',
                              'status':'ok','attacked_nc':met['nc'],'attacked_ncc':met['ncc'],
-                             'attacked_ber':met['ber'],'bit_accuracy':met['bit_accuracy']})
+                             'attacked_ber':met['ber'],'bit_accuracy':met['bit_accuracy'],
+                             'parameter':'','pass_nc_085':met['nc']>.85})
                 for cat,name,level,param in all_cases(args):
                     try:
                         attacked_rgb=attacks.attack(cv2.cvtColor(marked,cv2.COLOR_RGB2BGR),name,level,seed=args.seed)
@@ -427,8 +509,13 @@ def run_baselines(args):
                                      'status':'error','error':repr(exc)})
                         if args.fail_fast:raise
             except Exception as exc:
-                rows.append({'experiment':'baselines','method_id':baseline_id,'host':h.name,
-                             'watermark':w.name,'status':'error','error':repr(exc)})
+                for condition in attacks.canonical_conditions()[:1+len(all_cases(args))]:
+                    rows.append({'experiment':'baselines','method_id':baseline_id,
+                                 'variant':'original_unmodified','baseline_blindness':spec.blindness_tier,
+                                 'host':h.name,'watermark':w.name,
+                                 'category':condition['category'],'attack':condition['attack'],
+                                 'level':condition['level'],'parameter':condition['parameter'],
+                                 'status':'error','error':repr(exc)})
                 if args.fail_fast:raise
             write_rows(Path(args.out)/'per_attack.csv',rows)
             print('BASELINE',baseline_id,h.stem,w.stem,flush=True)
@@ -458,13 +545,12 @@ def run_analyze(args):
 
 
 def run_attacks(args):
-    cases=all_cases(args)
     if len(list(attacks.all_cases()))!=60:raise RuntimeError('Not exactly 60 attacks')
+    # Quick profile intentionally writes clean plus its selected attack subset.
     rows=[]
-    for cat,name,level,param in cases:
-        rows.append({'category':cat,'attack':name,'level':level,'parameter':repr(param),
-                     'status':'defined'})
-    # The manifest lists definitions, NOT experimental results.
+    for condition in attacks.canonical_conditions()[:1+len(all_cases(args))]:
+        rows.append({**condition, 'status':'defined'})
+    # Manifest entries are definitions, never claimed to be experimental results.
     write_rows(Path(args.out)/'attack_definitions.csv',rows)
     return rows
 
@@ -518,6 +604,7 @@ def make_parser():
     p.add_argument('--input',default=None,help='Existing per_attack.csv for analyze only')
     p.add_argument('--include-baselines',action='store_true',help='Also run unchanged original literature baselines in all command')
     p.add_argument('--fail-fast',action='store_true')
+    p.add_argument('--fresh',action='store_true',help='Ignore prior rows and recompute; default is safe exact-run resume')
     p.add_argument('--strict',action='store_true',help='Nonzero exit if clean PSNR/NC or post-attack threshold fails')
     p.add_argument('--psnr-min',type=float,default=45.0)
     p.add_argument('--nc-min',type=float,default=0.85)
@@ -531,9 +618,22 @@ def main(argv=None):
     if args.out is None:args.out=str(ROOT/'outputs'/'proposed'/args.experiment)
     out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
     cfg,key=load_setup(args)
-    (out/'run_settings.json').write_text(json.dumps({**settings_identity(args,cfg),
+    meta={**settings_identity(args,cfg),'experiment':args.experiment,
        'hosts':args.hosts,'watermarks':args.watermarks,'key_fingerprint':fingerprint(key),
-       'attack_limit':args.limit,'nonce_override':args.nonce},indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+       'attack_limit':args.limit,'nonce_override':args.nonce,
+       'variants':args.variants,'baselines':args.baselines,
+       'q_ll_values':args.q_ll_values,'q_detail_values':args.q_detail_values,
+       'payload_variants':args.payload_variants,'inputs_sha256':inputs_sha256()}
+    meta=json.loads(json.dumps(meta))  # Normalize dataclass tuples to the on-disk JSON form.
+    settings_file=out/'run_settings.json'
+    old_meta=read_json(settings_file) if settings_file.exists() else None
+    csv_file=out/'per_attack.csv'
+    args._resume_rows=[]
+    if not args.fresh and old_meta==meta and csv_file.is_file():
+        with csv_file.open(newline='',encoding='utf-8') as handle:
+            args._resume_rows=list(csv.DictReader(handle))
+        print('RESUME: found',len(args._resume_rows),'prior CSV rows from identical code/config/data.',flush=True)
+    settings_file.write_text(json.dumps(meta,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
     methods={'attacks':lambda:run_attacks(args),'energy':lambda:run_energy(args),
              'benchmark':lambda:run_benchmark(args,cfg,key),
              'ablation':lambda:run_ablation(args,cfg,key),

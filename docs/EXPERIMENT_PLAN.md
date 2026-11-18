@@ -44,3 +44,16 @@
 - For one host pair, mean differences are descriptive; do not claim statistical significance or generalization.
 - Schur of symmetric 4×4 component has four real eigenvalues sorted algebraically: the fixed diagonal indices are exact and reproducible. Energy dominance does not by itself prove robustness.
 - Different attack sets must be labeled distinctly: this suite replaces color quantization with WebP.
+
+## 61-condition audited runner
+
+Clone the **updated** repository and execute `bash scripts/run_all_ubuntu.sh full`.
+`scripts/run_paper_protocol.py` orchestrates the development/held-out split,
+complete 61-condition CSVs for every comparable method/variant/pair, statistical
+comparison, and `scripts/protocol_reports.py` validation. The report is
+`outputs/paper_protocol/reports/audit.json`; a missing result row, duplicate,
+protocol hash mismatch or unexpected baseline failure makes it incomplete.
+The 16 original method implementations remain unchanged; native DEW capacity
+is insufficient for the fixed 4096-bit payload and its conditions are recorded
+as `not_applicable_capacity`. Do not treat this as a measured robustness score.
+Security controls and energy surveys are not attack-based evaluations.

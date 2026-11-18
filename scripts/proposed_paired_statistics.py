@@ -19,7 +19,9 @@ def write(path,rows):
         keys=list(dict.fromkeys(k for r in rows for k in r))
         w=csv.DictWriter(f,keys);w.writeheader();w.writerows(rows)
 
-def key(r):return (r.get('host'),r.get('watermark'),r.get('attack'),r.get('level'))
+def key(r):
+    return (r.get('host'),r.get('watermark'),r.get('attack'),r.get('level'),
+            r.get('condition_id'),r.get('protocol_sha256'))
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -31,7 +33,9 @@ def main():
     a=p.parse_args()
     pr=[r for r in load(a.proposal) if r.get('status')=='ok']
     bl=[r for r in load(a.baselines) if r.get('status')=='ok']
-    proj={key(r):r for r in pr}
+    if any(not r.get('protocol_sha256') or not r.get('condition_id') for r in pr+bl):
+        raise SystemExit('Paired statistics requires protocol IDs and condition IDs in both inputs')
+    proj={key(r):r for r in pr} 
     baselines=sorted({r.get('method_id') for r in bl})
     rows=[];rng=np.random.default_rng(a.seed)
     for method in baselines:
