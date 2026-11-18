@@ -102,8 +102,9 @@ def load_wm(path):return m.read_watermark(path)
 def fingerprint(key):return hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]
 
 
-def derive_nonce(host,watermark,seed):
-    return f'{host.stem}|{watermark.stem}|seed={seed}|iwt-schur-v7'
+def derive_nonce(host,watermark,seed,override=None):
+    """A fixed nonce is available ONLY for exact V7 reference reproduction."""
+    return override if override is not None else f'{host.stem}|{watermark.stem}|seed={seed}|iwt-schur-v7'
 
 
 def settings_identity(args,cfg):
@@ -180,7 +181,7 @@ def measure_attack(base,marked,wm,name,level,param,key,nonce,cfg,decode='full',a
 
 def eval_one_pair(hpath,wpath,args,cfg,key,variant='full',decode='full',experiment='benchmark'):
     host=load_host(hpath);wm=load_wm(wpath)
-    nonce=derive_nonce(hpath,wpath,args.seed)
+    nonce=derive_nonce(hpath,wpath,args.seed,args.nonce)
     start=time.perf_counter()
     marked=method.embed(host,wm,key=key,nonce=nonce,cfg=cfg)
     embed_s=time.perf_counter()-start
@@ -256,7 +257,7 @@ def run_ablation(args,cfg,key):
     rows=[]
     variants=args.variants.split(',') if args.variants else list(DECODER_VARIANTS)+list(ENCODER_VARIANTS)
     for h,w in samples(args):
-        host=load_host(h);wm=load_wm(w);nonce=derive_nonce(h,w,args.seed)
+        host=load_host(h);wm=load_wm(w);nonce=derive_nonce(h,w,args.seed,args.nonce)
         shared=None
         if any(v in DECODER_VARIANTS for v in variants):
             t=time.perf_counter();shared=method.embed(host,wm,key=key,nonce=nonce,cfg=cfg)
@@ -361,7 +362,7 @@ def run_security(args,cfg,key):
     for h in hosts:
         for w in watermarks:
             host=load_host(h);wm=load_wm(w)
-            nonce=derive_nonce(h,w,args.seed)
+            nonce=derive_nonce(h,w,args.seed,args.nonce)
             marked=method.embed(host,wm,key=key,nonce=nonce,cfg=cfg)
             cases=[('positive',marked,key,nonce),('unmarked',host,key,nonce),
                    ('wrong_nonce',marked,key,nonce+'|wrong')]
@@ -504,6 +505,7 @@ def make_parser():
     p.add_argument('--watermarks',default='wm')
     p.add_argument('--out',default=None)
     p.add_argument('--key',default=None)
+    p.add_argument('--nonce',default=None,help='Fixed public nonce for reference reproduction; default derives it per pair')
     p.add_argument('--seed',type=int,default=2026)
     p.add_argument('--limit',type=int,default=None,help='Number of attack conditions; omit for all 60')
     p.add_argument('--variants',default=None,help='Comma-separated ablation variants')
@@ -531,7 +533,7 @@ def main(argv=None):
     cfg,key=load_setup(args)
     (out/'run_settings.json').write_text(json.dumps({**settings_identity(args,cfg),
        'hosts':args.hosts,'watermarks':args.watermarks,'key_fingerprint':fingerprint(key),
-       'attack_limit':args.limit},indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+       'attack_limit':args.limit,'nonce_override':args.nonce},indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
     methods={'attacks':lambda:run_attacks(args),'energy':lambda:run_energy(args),
              'benchmark':lambda:run_benchmark(args,cfg,key),
              'ablation':lambda:run_ablation(args,cfg,key),

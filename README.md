@@ -27,6 +27,34 @@ python -m pytest -q
 python scripts/validate_project.py
 ```
 
+## Exact reproducibility of the previously reported V7 Pepper + wm.png results
+
+The generic paper-protocol script intentionally uses a **different key and a per-pair
+nonce**, and therefore does **not** recreate the frozen V7 demonstration image.
+This difference affects PSNR, NC and the pilot detector. To reproduce the **same**
+V7 experiment with the integrated proposal, use:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python scripts/reproduce_v7_reference.py \
+  --out outputs/v7_exact_reference
+```
+
+To verify all 60 rows against the previously published V7 WebP CSV, provide its
+file path; the source-only archive deliberately does not bundle results:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python scripts/reproduce_v7_reference.py \
+  --out outputs/v7_exact_reference \
+  --reference /path/to/FINAL_IWT_Schur_4x4_V7_WebP_60_Attacks.csv
+```
+
+The comparison checks NC, BER, pilot scores, `detected`, decoder mode and clean
+PSNR. It refuses to claim a match if any row differs beyond numeric formatting
+tolerance. Exact-reference values: key `FIXED_T44_DEMO_KEY`, nonce
+`pepper_wm_fixed_t44`, attack seed `2026`, iterations `8`, LL/detail/pilot
+QIM steps `28/14/32`. This reproducibility key is PUBLIC and should not be used
+as a secret operational key. All baseline source files stay byte-identical.
+
 ## Run experiments (outputs created at runtime, not in this ZIP)
 
 ```bash
