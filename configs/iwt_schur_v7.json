@@ -1,0 +1,19 @@
+{
+  "proposal_id": "iwt_schur_4x4_dual_pilot",
+  "host_size": 512,
+  "watermark_size": 64,
+  "block_size": 4,
+  "band_carriers": {"LL": "T44", "LH": "T11", "HL": "T11", "HH": "T44"},
+  "carrier_indices": [3, 0, 0, 3],
+  "ll_copies": 2,
+  "detail_copies": 2,
+  "q_ll": 28.0,
+  "q_detail": 14.0,
+  "q_pilot": 32.0,
+  "iterations": 8,
+  "pilot_threshold": 0.69,
+  "ll_vote_weight": 6.0,
+  "attack_suite": "webp20x3",
+  "attack_seed": 2026,
+  "key": "IWT_SCHUR_RESEARCH_KEY_CHANGE_ME"
+}
